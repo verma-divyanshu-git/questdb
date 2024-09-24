@@ -1,0 +1,73 @@
+trigger:
+  branches:
+    exclude:
+      - "*"
+  tags:
+    include:
+      - '*.*.*'
+
+pr: none
+
+schedules:
+  - cron: "0 0 * * *"
+    displayName: Midnight Trigger
+    branches:
+      include:
+        - master
+
+pool:
+  vmImage: 'ubuntu-20.04'
+
+jobs:
+  - job: RunOn
+    displayName: "Build and push docker"
+
+    pool:
+      name: "Azure Pipelines"
+      vmImage: "ubuntu-latest"
+
+    timeoutInMinutes: 60
+
+    steps:
+      - task: Docker@2
+        inputs:
+          command: 'login'
+          containerRegistry: quest_docker_hub
+
+      - task: CmdLine@2
+        displayName: Setup docker buildx
+        inputs:
+          script: |
+            docker run --privileged --rm tonistiigi/binfmt --install arm64
+            docker run --privileged --rm tonistiigi/binfmt
+            docker buildx create --use
+
+      - task: CmdLine@2
+        displayName: Release Nightly MASTER
+        inputs:
+          script: |
+            docker buildx build --platform linux/amd64,linux/arm64 --push -t questdb/questdb:nightly .
+            docker buildx build --build-arg base_image=registry.access.redhat.com/ubi9/ubi --platform linux/amd64,linux/arm64 --push -t questdb/questdb:nightly-rhel .
+          workingDirectory: core
+        condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+
+      - task: CmdLine@2
+        displayName: Release Tag
+        inputs:
+          script: |
+            # Cannot use Build.SourceBranchName if a tag name contains a "/", since the var only returns the final path component
+            # We use cut instead to trim the first 2 components off the Build.SourceBranch ("refs/tags")
+            tag_name=$(echo "$(Build.SourceBranch)" | cut -d'/' -f '3-')
+            echo $tag_name
+            pattern='^[0-9]+\.[0-9]+\.[0-9]+$'
+            if [[ "$tag_name" =~ $pattern ]]; then
+              echo "labeling latest"
+              docker buildx build --build-arg tag_name=$tag_name --platform linux/amd64,linux/arm64 --push -t questdb/questdb:$tag_name -t questdb/questdb:latest .
+            else
+              echo "NOT labeling latest"
+              docker buildx build --build-arg tag_name=$tag_name --platform linux/amd64,linux/arm64 --push -t questdb/questdb:$tag_name .
+            fi
+            docker buildx build --build-arg tag_name=$tag_name --build-arg base_image=registry.access.redhat.com/ubi9/ubi --platform linux/amd64,linux/arm64 --push -t questdb/questdb:$tag_name-rhel .
+          workingDirectory: core
+        condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/'))
+
